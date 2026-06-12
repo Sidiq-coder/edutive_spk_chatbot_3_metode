@@ -5,7 +5,7 @@ import numpy as np
 
 # ============================================================
 # EDUTIVE AI - CHATBOT SPK REKOMENDASI SISWA PERLU BIMBINGAN
-# Metode: SAW, Weighted Product, TOPSIS
+# Metode: SAW, WASPAS, TOPSIS
 # ============================================================
 
 st.set_page_config(
@@ -175,7 +175,7 @@ def validate_and_prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     df["improvement_score"] = df["post_test_score"] - df["pre_test_score"]
 
     # Jika peningkatan negatif, tetap dipakai sebagai sinyal kuat perlu bimbingan.
-    # Agar metode WP aman dari nilai negatif, nanti dilakukan shifting khusus.
+    # Nilai negatif akan digeser agar aman untuk normalisasi dan perpangkatan.
 
     return df
 
@@ -196,7 +196,7 @@ def normalize_weights(weights: dict) -> dict:
 def make_positive_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
     """
     Mengubah nilai agar semua positif.
-    Dibutuhkan terutama untuk Weighted Product karena ada operasi perkalian berpangkat.
+    Dibutuhkan untuk metode yang memakai pembagian normalisasi dan perpangkatan.
     Jika ada nilai 0 atau negatif, nilai digeser agar minimum menjadi 1.
     """
     positive = matrix.copy().astype(float)
@@ -209,18 +209,10 @@ def make_positive_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
     return positive
 
 
-# ============================================================
-# 4. METODE SAW
-# ============================================================
-
-def calculate_saw(df: pd.DataFrame, criteria_config: dict, weights: dict) -> pd.DataFrame:
-    criteria_cols = list(criteria_config.keys())
-    matrix = get_decision_matrix(df, criteria_cols)
-    matrix = make_positive_matrix(matrix)
-
+def normalize_benefit_cost(matrix: pd.DataFrame, criteria_config: dict) -> pd.DataFrame:
     normalized = pd.DataFrame(index=matrix.index)
 
-    for col in criteria_cols:
+    for col in matrix.columns:
         direction = criteria_config[col]["direction"]
 
         if direction == "benefit":
@@ -229,6 +221,19 @@ def calculate_saw(df: pd.DataFrame, criteria_config: dict, weights: dict) -> pd.
         else:
             min_value = matrix[col].min()
             normalized[col] = min_value / matrix[col] if min_value != 0 else 0
+
+    return normalized
+
+
+# ============================================================
+# 4. METODE SAW
+# ============================================================
+
+def calculate_saw(df: pd.DataFrame, criteria_config: dict, weights: dict) -> pd.DataFrame:
+    criteria_cols = list(criteria_config.keys())
+    matrix = get_decision_matrix(df, criteria_cols)
+    matrix = make_positive_matrix(matrix)
+    normalized = normalize_benefit_cost(matrix, criteria_config)
 
     score = sum(normalized[col] * weights[col] for col in criteria_cols)
 
@@ -240,33 +245,39 @@ def calculate_saw(df: pd.DataFrame, criteria_config: dict, weights: dict) -> pd.
 
 
 # ============================================================
-# 5. METODE WEIGHTED PRODUCT
+# 5. METODE WASPAS
 # ============================================================
 
-def calculate_weighted_product(df: pd.DataFrame, criteria_config: dict, weights: dict) -> pd.DataFrame:
+def calculate_waspas(
+    df: pd.DataFrame,
+    criteria_config: dict,
+    weights: dict,
+    lambda_value: float = 0.5
+) -> pd.DataFrame:
+    if not 0 <= lambda_value <= 1:
+        raise ValueError("Nilai lambda WASPAS harus berada pada rentang 0 sampai 1.")
+
     criteria_cols = list(criteria_config.keys())
     matrix = get_decision_matrix(df, criteria_cols)
     matrix = make_positive_matrix(matrix)
+    normalized = normalize_benefit_cost(matrix, criteria_config)
 
-    weighted_matrix = pd.DataFrame(index=matrix.index)
+    q1_score = sum(normalized[col] * weights[col] for col in criteria_cols)
 
+    q2_components = pd.DataFrame(index=matrix.index)
     for col in criteria_cols:
-        direction = criteria_config[col]["direction"]
-        weight = weights[col]
+        q2_components[col] = np.power(normalized[col], weights[col])
 
-        # Benefit: pangkat positif
-        # Cost: pangkat negatif
-        exponent = weight if direction == "benefit" else -weight
-        weighted_matrix[col] = np.power(matrix[col], exponent)
-
-    s_vector = weighted_matrix.prod(axis=1)
-    v_vector = s_vector / s_vector.sum() if s_vector.sum() != 0 else s_vector
+    q2_score = q2_components.prod(axis=1)
+    waspas_score = (lambda_value * q1_score) + ((1 - lambda_value) * q2_score)
 
     result = df.copy()
-    result["WP_score"] = v_vector
-    result["WP_rank"] = result["WP_score"].rank(ascending=False, method="dense").astype(int)
+    result["WASPAS_Q1_sum_score"] = q1_score
+    result["WASPAS_Q2_product_score"] = q2_score
+    result["WASPAS_score"] = waspas_score
+    result["WASPAS_rank"] = result["WASPAS_score"].rank(ascending=False, method="dense").astype(int)
 
-    return result.sort_values("WP_rank")
+    return result.sort_values("WASPAS_rank")
 
 
 # ============================================================
@@ -321,9 +332,14 @@ def calculate_topsis(df: pd.DataFrame, criteria_config: dict, weights: dict) -> 
 # 7. PERBANDINGAN TIGA METODE
 # ============================================================
 
-def compare_methods(df: pd.DataFrame, criteria_config: dict, weights: dict) -> pd.DataFrame:
+def compare_methods(
+    df: pd.DataFrame,
+    criteria_config: dict,
+    weights: dict,
+    lambda_value: float = 0.5
+) -> pd.DataFrame:
     saw = calculate_saw(df, criteria_config, weights)
-    wp = calculate_weighted_product(df, criteria_config, weights)
+    waspas = calculate_waspas(df, criteria_config, weights, lambda_value=lambda_value)
     topsis = calculate_topsis(df, criteria_config, weights)
 
     comparison = df[
@@ -349,7 +365,15 @@ def compare_methods(df: pd.DataFrame, criteria_config: dict, weights: dict) -> p
     )
 
     comparison = comparison.merge(
-        wp[["student_id", "WP_score", "WP_rank"]],
+        waspas[
+            [
+                "student_id",
+                "WASPAS_Q1_sum_score",
+                "WASPAS_Q2_product_score",
+                "WASPAS_score",
+                "WASPAS_rank",
+            ]
+        ],
         on="student_id",
         how="left"
     )
@@ -361,7 +385,7 @@ def compare_methods(df: pd.DataFrame, criteria_config: dict, weights: dict) -> p
     )
 
     comparison["average_rank"] = comparison[
-        ["SAW_rank", "WP_rank", "TOPSIS_rank"]
+        ["SAW_rank", "WASPAS_rank", "TOPSIS_rank"]
     ].mean(axis=1)
 
     comparison["final_priority_rank"] = comparison["average_rank"].rank(
@@ -487,7 +511,7 @@ st.write(
     dan konsistensi latihan.
 
     Metode yang dibandingkan:
-    **SAW**, **Weighted Product**, dan **TOPSIS**.
+    **SAW**, **WASPAS**, dan **TOPSIS**.
     """
 )
 
@@ -522,6 +546,21 @@ with st.sidebar:
         st.stop()
 
     st.write("Total bobot:", round(sum(weights.values()), 4))
+
+    st.divider()
+
+    st.header("Parameter WASPAS")
+    waspas_lambda = st.slider(
+        "Nilai lambda",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.5,
+        step=0.05,
+        help=(
+            "Lambda mengatur gabungan Q1 penjumlahan berbobot dan "
+            "Q2 perkalian berpangkat. Nilai 0.5 berarti seimbang."
+        )
+    )
 
 
 # ============================================================
@@ -638,7 +677,12 @@ if len(prepared_df) < 2:
     st.warning("Minimal butuh 2 siswa agar metode SPK dapat dibandingkan.")
     st.stop()
 
-comparison = compare_methods(prepared_df, CRITERIA_CONFIG, weights)
+comparison = compare_methods(
+    prepared_df,
+    CRITERIA_CONFIG,
+    weights,
+    lambda_value=waspas_lambda
+)
 
 comparison["reason"] = comparison.apply(generate_reason, axis=1)
 comparison["teacher_recommendation"] = comparison.apply(generate_teacher_recommendation, axis=1)
@@ -684,7 +728,7 @@ with st.expander("Lihat Data Siswa"):
 # 15. TABEL PERBANDINGAN METODE
 # ============================================================
 
-st.subheader("🏆 Perbandingan Ranking SAW, Weighted Product, dan TOPSIS")
+st.subheader("🏆 Perbandingan Ranking SAW, WASPAS, dan TOPSIS")
 
 display_cols = [
     "final_priority_rank",
@@ -700,8 +744,10 @@ display_cols = [
     "practice_consistency",
     "SAW_score",
     "SAW_rank",
-    "WP_score",
-    "WP_rank",
+    "WASPAS_Q1_sum_score",
+    "WASPAS_Q2_product_score",
+    "WASPAS_score",
+    "WASPAS_rank",
     "TOPSIS_score",
     "TOPSIS_rank",
     "average_rank",
@@ -734,7 +780,7 @@ chart_df = comparison.head(10)[
     [
         "student_name",
         "SAW_score",
-        "WP_score",
+        "WASPAS_score",
         "TOPSIS_score",
     ]
 ].set_index("student_name")
@@ -769,8 +815,10 @@ with detail_cols[0]:
     st.metric("SAW Score", f"{selected_row['SAW_score']:.4f}")
 
 with detail_cols[1]:
-    st.metric("WP Rank", int(selected_row["WP_rank"]))
-    st.metric("WP Score", f"{selected_row['WP_score']:.4f}")
+    st.metric("WASPAS Rank", int(selected_row["WASPAS_rank"]))
+    st.metric("WASPAS Score", f"{selected_row['WASPAS_score']:.4f}")
+    st.metric("Q1 / Sum", f"{selected_row['WASPAS_Q1_sum_score']:.4f}")
+    st.metric("Q2 / Product", f"{selected_row['WASPAS_Q2_product_score']:.4f}")
 
 with detail_cols[2]:
     st.metric("TOPSIS Rank", int(selected_row["TOPSIS_rank"]))
@@ -818,7 +866,7 @@ elif question == "Siapa 5 siswa prioritas bimbingan?":
     st.chat_message("user").write(question)
     st.chat_message("assistant").write(
         f"""
-        Berikut 5 siswa prioritas bimbingan berdasarkan gabungan metode SAW, WP, dan TOPSIS:
+        Berikut 5 siswa prioritas bimbingan berdasarkan gabungan metode SAW, WASPAS, dan TOPSIS:
 
         {names_text}
         """
@@ -905,10 +953,10 @@ with st.expander("Penjelasan Singkat Metode"):
         SAW menghitung skor akhir dengan cara menormalisasi nilai setiap kriteria,
         lalu menjumlahkan nilai tersebut berdasarkan bobot.
 
-        ### 2. Weighted Product
-        Weighted Product menghitung skor dengan perkalian setiap nilai kriteria
-        yang dipangkatkan dengan bobot. Kriteria benefit memakai pangkat positif,
-        sedangkan kriteria cost memakai pangkat negatif.
+        ### 2. WASPAS - Weighted Aggregated Sum Product Assessment
+        WASPAS menggabungkan Q1 penjumlahan berbobot dan Q2 perkalian berpangkat
+        dari nilai kriteria yang sudah dinormalisasi. Skor akhir dihitung dengan
+        lambda untuk menyeimbangkan kedua komponen tersebut.
 
         ### 3. TOPSIS
         TOPSIS menentukan alternatif terbaik berdasarkan jarak terhadap solusi ideal positif

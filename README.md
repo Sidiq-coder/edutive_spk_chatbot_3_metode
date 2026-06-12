@@ -10,7 +10,7 @@ Aplikasi ini adalah contoh MVP untuk fitur **Chatbot SPK Rekomendasi Siswa yang 
 3. Input data siswa manual lewat form.
 4. Perhitungan SPK menggunakan 3 metode:
    - SAW / Simple Additive Weighting
-   - Weighted Product
+   - WASPAS / Weighted Aggregated Sum Product Assessment
    - TOPSIS
 5. Perbandingan ranking dari ketiga metode.
 6. Ranking gabungan berdasarkan rata-rata ranking.
